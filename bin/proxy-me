@@ -1,0 +1,88 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+use Digest::MD5 qw(md5_hex);
+
+my %OPTIONS;
+
+GetOptions \%OPTIONS, qw/
+	help|h
+	debug|D
+
+	http|H=s
+	https=s
+	noproxy|no-proxy|n=s@
+/;
+
+if (!$OPTIONS{http} && $OPTIONS{https}) {
+	$OPTIONS{http} = $OPTIONS{https};
+} elsif (!$OPTIONS{https} && $OPTIONS{http}) {
+	$OPTIONS{https} = $OPTIONS{http};
+}
+
+for my $key (qw(http https)) {
+	if ($OPTIONS{$key} && $OPTIONS{$key} !~ m{https?://}) {
+		$OPTIONS{$key} = "http://$OPTIONS{$key}";
+	}
+}
+
+## cidr("10.0.0.0/8") -> ('10.0.0.1', '10.0.0.2', ...)
+sub cidr {
+	my ($cidr) = @_;
+	my @lst;
+
+	my ($netip, $mask) = split '/', $cidr;
+	if ($mask > 30 || $mask < 0) {
+		die "invalid netmask '$mask' in CIDR specification '$cidr'\n";
+	}
+	my $netmask = ((1<<32) - (1<<(32-$mask))) & ((1<<32)-1);
+	my $base = unpack('N', pack('CCCC', split(/\./, $netip))) & $netmask;
+	my $top  = ($base | ~$netmask) & 0xffffffff;
+
+	for (my $ip = $base + 1; $ip < $top; $ip++) {
+		push @lst, join('.', unpack('C4', pack('N', $ip)));
+	}
+	return @lst;
+}
+
+## range("10.0.0.5-10.0.0.7") -> ('10.0.0.5', '10.0.0.6', '10.0.0.7')
+sub range {
+	my ($range) = @_;
+	my @lst;
+
+	my ($a, $b) = split '-', $range;
+	my $first = unpack('N', pack('CCCC', split(/\./, $a)));
+	my $last  = unpack('N', pack('CCCC', split(/\./, $b)));
+	if ($first >= $last) {
+		die "invalid range '$range' - first address must be below the second address!\n";
+	}
+
+	for (my $ip = $first; $ip <= $last; $ip++) {
+		push @lst, join('.', unpack('C4', pack('N', $ip)));
+	}
+	return @lst;
+}
+
+my @no_proxy;
+for my $list (@{ $OPTIONS{noproxy} }) {
+	for my $range (split /\s*,\s*/, $list) {
+		if ($range =~ m/^([\d.]+)-([\d.]+)$/) {
+			push @no_proxy, range($range);
+		} elsif ($range =~ m{^[\d.]+/\d+$}) {
+			push @no_proxy, cidr($range);
+		} else {
+			push @no_proxy, $range;
+		}
+	}
+}
+$OPTIONS{http} ||= "";
+$OPTIONS{https} ||= "";
+
+my $id = substr(md5_hex("$OPTIONS{http}||$OPTIONS{https}||".join(',',@no_proxy)), 0, 16);
+print "echo \"Setting Proxy Settings ($id)\";\n";
+print "export http_proxy=\"$OPTIONS{http}\";\n"   if $OPTIONS{http};
+print "export https_proxy=\"$OPTIONS{https}\";\n" if $OPTIONS{https};
+print "export no_proxy=\"".join(',', @no_proxy)."\";\n";
